@@ -6,11 +6,13 @@ from functools import partial
 from scipy.sparse import coo_array
 from collections import Counter
 
-from IPython.core.display import display, Markdown
+from IPython.core.display import Markdown
+from IPython.display import display
 
 from .FockSystemBase import FockSystemBase, hamming_weight, operator_verbose,operator_from_string
 from .FockSystemSparse import FockOperVerySparse,FockStatesVerySparse
 from .c import fermion_operations as fo
+
 
 from typing import Callable, List, Any, Self
 
