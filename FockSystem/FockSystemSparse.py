@@ -1,33 +1,22 @@
-import numpy as np
 from  .c import fermion_operations as fo
 from functools import partial
 
 ## Class implementing matrix-vector multiplication storing only minimal data
-class FockOperVerySparse():
-    def __init__(self, sparse_fock_basis, oper_list, weights):
-        self.oper_list = self.padded_oper_list(oper_list)
-        self.values = np.array(weights,dtype=complex)
+class OperSequenceDataSparse():
+    def __init__(self, sparse_fock_basis, sparse_data):
         self.fock_basis = sparse_fock_basis 
+        self.values = sparse_data[0]
+        self.rc_indices = sparse_data[1]
+        self.type_strings = sparse_data[2] 
         
-    @staticmethod
-    def padded_oper_list(oper_list):
-        max_len = 0
-        for op in oper_list:
-            if isinstance(op,list):
-                if len(op)>max_len:
-                    max_len = len(op)
-        new_list = []
-        for op in oper_list:
-            if isinstance(op,list):
-                new_list.append(op + [-1]*(max_len-len(op)))
-        return np.array(new_list,dtype=np.int32)
-
     def get_sparse_func(self):
-        return partial(fo.very_sparse_matvec, Hamiltonian = self.oper_list, vals = self.values)
+        return partial(fo.matvec_fast, H_base_data =  self.rc_indices, H_base_vals = self.values)
 
     def __matmul__(self, vector):
+        if len(vector) != 4**self.fock_basis.N:
+            raise ValueError("Vector length does not match the Fock basis size.")
         return self.get_sparse_func()(vector)
-
-class FockStatesVerySparse():
+    
+class FockStatesSparse():
     def __init__(self, N):
         self.N = N

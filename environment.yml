@@ -1,4 +1,4 @@
-name: FockSystem
+name: KitaevTool
 channels:
   - defaults
 dependencies:

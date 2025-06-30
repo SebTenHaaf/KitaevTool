@@ -5,17 +5,11 @@ from scipy.sparse.linalg import LinearOperator, eigsh
 from scipy.linalg import block_diag
 from FockSystem.FockSystemBase import operator_verbose
 
+
 from tqdm import tqdm
 from pathlib import Path
 import json
 import xarray as xr
-
-
-class DummyVariable():
-    def __init__(self,label,fancy_label):
-        self.label = label
-        self.fancy_label = fancy_label
-
 
 def n_F(E, mu, kBT):
     energy = (E - mu) / kBT
@@ -137,27 +131,25 @@ def wrap_in_xarray(coords, datasets):
         coord_values, coord_data = coord_pair  # Unpacking for clarity
         
         # Ensure we correctly extract 'label'
-        data_label = coord_values.label if hasattr(coord_values, 'label') else f'{idx}'
-        if hasattr(coord_values,'fancy_label'):
-            data_string = coord_values.fancy_label
-        else:
-            data_string = grab_symbolic_variables(coord_values)  # Function assumed to exist
+        data_label = coord_values.label if hasattr(coord_values, 'label') else f'coord_{idx}'
+        data_string = grab_symbolic_variables(coord_values)  # Function assumed to exist
         
         # Store in xarray_coord
         xarray_coord[data_label] = xr.DataArray(
             coord_data, coords={data_label:coord_data,}, dims=(data_label,), attrs={"long_name": data_string, "units": "-"}
         )
 
-
     xarray_datasets = {}
+
     # Process datasets
     for idx, data in datasets.items():
         var_name, long_name, data_values, coordinates = data  # Unpacking assuming (name, label, values, dims)
+
         # Ensure dims exist in xarray_coord
-        valid_dims = [f'{dim}' for dim in coordinates if f'{dim}' in xarray_coord.keys() ]
+        valid_dims = [dim if dim in xarray_coord.keys() for dim in coordinates]
         valid_dims.reverse()
         coords = {dim: xarray_coord[dim] for dim in valid_dims}
-        
+
         xarray_datasets[var_name] = xr.DataArray(
             data_values,
             coords = coords,
@@ -188,8 +180,6 @@ def phase_diagram(H, odd_basis, even_basis, subseq_x, x_range, subseq_y, y_range
     {0: ['E','$E_{odd} - E_{even}$', np.reshape(result_data, (len(y_range),len(x_range))), [0,1]]}
     )
     return dataset
-
-
 
 def lowest_transitions_sorted(
         H, basis: int,sites, lowest_n_values= 1,
@@ -224,6 +214,7 @@ def lowest_transitions_sorted(
         filtered_weights = [[] for i in range(len(sites))]
         for idx in range(len(sites)):
             filter_zeros = np.where(np.array(weights_all[idx]) > 0)[0]
+
             filtered_T_all[idx] = np.array(T_all[idx])[filter_zeros]
             filtered_weights[idx] = np.array(weights_all[idx])[filter_zeros]
 
@@ -243,10 +234,7 @@ def energy_spectrum(H,basis, param_seq, param_range, sites, fig, axs, plot=True)
             all_energies[i].extend(energies[i])
             all_weights[i].extend(weights[i])
             all_xvars[i].extend(np.full(len(weights[i]), param_range[v_idx]))
-
     if plot:
-        for ax in axs:
-            ax.set_xlabel(grab_symbolic_variables(param_seq))
         for i in range(len(sites)):
             plot_energy_spectrum(
                 fig,
@@ -266,7 +254,6 @@ def plot_energy_spectrum(fix, ax, mu, energies, weights, xval, site):
     weights = np.minimum(weights, 1)
     ax.scatter(mu, energies, alpha=np.abs(weights), s=3, color="black")
     ax.set_title(f"Spectum site {site}")
-    ax.set_ylabel(f"E")
 
 
 def rate_equation(
@@ -341,36 +328,7 @@ def rate_equation(
                 gs = 2 * np.pi * (Is1 - Is0) / (2 * lead_params["dV"])
                 G_matrix[:, j, i] = gs
         return G_matrix
-def charge_stability_diagram(H,  basis, subseq_x, x_range, subseq_y, y_range,sites=[0, 1],lead_params={},  n_values = 100, disable_timer=False):
 
-    n_sites = len(sites)
-    Gs = [[[] for i in range(n_sites)] for j in range(n_sites)]
-
-    for y_value in tqdm(y_range, disable=disable_timer):
-        H[subseq_y] = y_value
-        for x_value in x_range:
-            H[subseq_x] = x_value
-            G_matrix = rate_equation(
-                H,basis, sites, [0], lead_params, truncate_lim = n_values
-            )
-
-            for i in range(n_sites):
-                for j in range(n_sites):
-                    Gs[i][j].append(G_matrix[i][j])
-
-    coord_data = {
-       'param_x': [subseq_x, x_range],
-       'param_y': [subseq_y, y_range],
-    }
-
-    datasets_data={}
-    for i in range(n_sites):
-        for j in range(n_sites):
-            datasets_data[f'{i}{j}'] = ["G_" + f"{sites[i]}{sites[j]}","G_" + f"{sites[i]}{sites[j]}",np.reshape(Gs[i][j], (len(x_range), len(y_range))), [f"param_x",'param_y',]]
-
-    dataset = wrap_in_xarray(coord_data,datasets_data )
-
-    return dataset
 def conductance_spectrum(
     H,
     basis,
@@ -379,7 +337,9 @@ def conductance_spectrum(
     bias_range,
     sites=[0, 1],
     lead_params={},
-    n_values = 100
+    plot=True,
+    method="linalg",
+    n_values=50,
 ):
     n_sites = len(sites)
     Gs = [[[] for i in range(n_sites)] for j in range(n_sites)]
@@ -393,19 +353,49 @@ def conductance_spectrum(
         for i in range(n_sites):
             for j in range(n_sites):
                 Gs[i][j].append(G_matrix[i][j])
+    if plot:
+        ## Create Figure
+        fig, axs = plt.subplots(ncols=len(sites), figsize=(len(sites) * 2.5, 2))
+        for ax in axs:
+            ax.set_xlabel("$\\delta \\mu$")
+            ax.set_ylabel("$V_{\\mathrm{bias}}$")
+        for i in range(n_sites):
+            im = axs[i].pcolormesh(
+                param_range, bias_range, np.transpose(Gs[i][i]), cmap="Reds"
+            )
+            cbar = fig.colorbar(im, ax=axs[i])
+        plt.tight_layout()
+    """
+    ## Generate an xarray dataset
+    param_str = params[0][:2]
 
-    coord_data = {
-        f'bias_{s}':[DummyVariable(f'bias_{s}','$V_'+f'{s}'+'$'),bias_range] for s in sites
+    coords = {
+        f"bias_{s}": xr.DataArray(
+            bias_range, dims=f"bias_{s}", attrs={"long_name": f"bias_{s}", "units": "-"}
+        )
+        for s in sites
     }
-    coord_data['param'] = [subsequence, param_range]
+    coords[f"{param_str}"] = xr.DataArray(
+        param_range, dims=f"{param_str}", attrs={"long_name": f"{param_str}", "units": ""}
+    )
 
-    datasets_data={}
+    datasets = {}
     for i in range(n_sites):
         for j in range(n_sites):
-            datasets_data[f'{i}{j}'] = ["G_" + f"{sites[i]}{sites[j]}","G_" + f"{sites[i]}{sites[j]}",np.reshape(Gs[i][j], (len(param_range), len(bias_range))), [f"bias_{sites[j]}",'param',]]
-
-    dataset = wrap_in_xarray(coord_data,datasets_data )
-    return dataset.transpose()
+            datasets["G_" + f"{sites[i]}{sites[j]}"] = (
+                [
+                    f"{param_str}",
+                    f"bias_{sites[j]}",
+                ],
+                np.reshape(Gs[i][j], (len(param_range), len(bias_range))),
+                {"long_name": "G_" + f"{sites[i]}{sites[j]}", "unit": "x"},
+            )
+    ds = xr.Dataset(
+        data_vars=datasets,
+        coords=coords,  # Define coordinates
+    )
+    return ds
+    """
 
 def eigenstates(self, only_ground_states=False, only_energies=False):
     """

@@ -1,6 +1,7 @@
 
 import numpy as np
 cimport numpy as cnp
+from cython cimport boundscheck, wraparound
 
 def merge_terms_cython(list weights, list oper_list):
     cdef dict merged_dict = {}
@@ -17,7 +18,7 @@ def merge_terms_cython(list weights, list oper_list):
         # Convert lists to tuples (if seq is a list) for hashability
         if isinstance(seq, list):
             seq = tuple(seq)
-        
+
         if seq not in merged_dict:
             merged_dict[seq] = weight            
         else:
@@ -59,7 +60,7 @@ cpdef tuple act_oper(int oper, int state):
 
     # Flip bit
     cdef int new_state = state ^ flip_bit
-  
+
     return new_state, signs
 
 
@@ -73,7 +74,7 @@ cpdef list apply_act_oper_to_all(int oper, int N):
     for i in range(N + 1):  # Loop over all numbers from 0 to N
         result = act_oper(oper, i)
         #results.append(result)  # Store results in a Python list
-    
+
     return results
 
 
@@ -122,76 +123,6 @@ cpdef cnp.ndarray very_sparse_matvec(
                 result[n] = result[n] + vals[h] * x[new_state] * sign
                 if (n!=new_state):
                     result[new_state] = result[new_state] + vals[h] * x[n] * sign   
-    return result
-
-cpdef ultra_sparse_matvec(cnp.ndarray[double complex, ndim=1] vec, dict sorted_H, int np_treshhold):
-    cdef int i, j, array_base_size = 4**2, terms_to_check = 1
-    cdef list check_H = []
-    cdef cnp.ndarray[double complex, ndim=1] result = np.zeros_like(vec)
-    cdef int new_state, new_sign, N_iter,shift_size,sign
-    check_H = sorted_H[terms_to_check]
-    cdef int vec_len = len(vec)
-
-    N_iter = vec_len//array_base_size
-    cdef cnp.ndarray[int, ndim=1] shifts = np.arange(N_iter,dtype=np.int32) * array_base_size
-    cdef bint numpify = 0
-
-    if N_iter >=np_treshhold:
-        numpify = 1
-    ## Evaluate the first block
-    for i in range(16):
-        for h in check_H:
-            sign = 1 
-            new_state = i  
-            for o in h:
-                if  new_state != -1:
-                    new_state, new_sign = act_oper(o, new_state)
-                    sign *= new_sign
-                else:
-                    break
-            
-            if new_state >= 0 and new_state != i:
-                if numpify:
-                    result[shifts+new_state] = result[shifts+new_state] + vec[i + shifts] * sign
-                else:
-                    for j in range(N_iter):
-                        shift_size = shifts[j]
-                        result[int(new_state + shift_size)] = result[int(new_state + shift_size)] + vec[i + shift_size] * sign
-
-    ## Rest of the evaulation
-    for i in range(16, vec_len):
-        if i & array_base_size:
-            array_base_size <<= 2
-            terms_to_check += 1
-            check_H = sorted_H[terms_to_check]
-            N_iter = vec_len//array_base_size
-            shifts = np.arange(N_iter,dtype=np.int32) * array_base_size
-            if N_iter <=np_treshhold:
-                numpify = 0
-
-        for h in check_H:
-            sign = 1  # reset the sign
-            new_state = i  # set the new_state to the counter
-            
-            for o in h:
-                if  new_state != -1:
-                    new_state, new_sign = act_oper(o, new_state)
-                    sign *= new_sign
-                else:
-                    break
-            
-            if new_state >= 0 and new_state != i:
-                if numpify:
-                    result[shifts+new_state] = result[shifts+new_state] + vec[i + shifts] * sign
-                    if new_state <= (array_base_size >> 2) and i >= (array_base_size >> 2):
-                        result[i + shifts] =result[i + shifts] + vec[new_state + shifts] * sign
-                else:
-                    for j in range(N_iter):
-                        shift_size = shifts[j]
-                        result[new_state + shift_size] = result[new_state + shift_size] + vec[i + shift_size] * sign
-                        if new_state <= (array_base_size >> 2) and i >= (array_base_size >> 2):
-                            result[i + shift_size] =result[i + shift_size] + vec[new_state + shift_size] * sign
-
     return result
 
 def multiplication_basis(
@@ -310,4 +241,43 @@ cpdef tuple remove_duplicates(list weights, list oper_list):
                 weights.pop(idx)
 
     return weights, oper_list  # Return updated lists
+
+@boundscheck(False)
+@wraparound(False)
+cdef int fill_memory(double[:] input_vec, double[:] output_vec,
+                long start_i, long start_j, long small_rep, long big_rep, long big_rep_spacing, double val) nogil:
+    cdef int i, j
+    cdef long i_val, j_val
+    cdef double tmp
+
+    for i in range(big_rep):
+        for j in range(small_rep):
+            i_val = start_i + i * big_rep_spacing + j
+            j_val = start_j + i * big_rep_spacing + j
+            output_vec[i_val] += input_vec[j_val] * val
+            output_vec[j_val] += input_vec[i_val] * val
+    return 0
+
+# Parallel loop function in Cython using prange (OpenMP)
+@boundscheck(False)
+@wraparound(False)
+cpdef matvec_fast(cnp.ndarray[double, ndim=1] input_vec, long long[:,:] H_base_data, cnp.ndarray[double, ndim=1] H_base_vals):
+    cdef int counter=0
+    cdef int n_tuples = H_base_data.shape[0]
+    cdef cnp.ndarray[double,ndim=1] output_vec = np.zeros_like(input_vec,order='C')
+    cdef long base_i, base_j, small_rep, big_rep, big_rep_spacing
+    cdef double base_value = 0
+    cdef int n_threads = 0
+
+    for counter in range(n_tuples):
+        base_i = H_base_data[counter][0]
+        base_j = H_base_data[counter][1]
+        small_rep = H_base_data[counter][2]
+        big_rep = H_base_data[counter][3]
+        big_rep_spacing = H_base_data[counter][4]
+        base_value = H_base_vals[counter]
+        if base_value != 0:
+            fill_memory(input_vec,output_vec, base_i,base_j, small_rep,big_rep, big_rep_spacing,base_value)
+
+    return output_vec
 
