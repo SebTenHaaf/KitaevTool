@@ -1,8 +1,5 @@
-from FockSystem.FockSystem import OperSequence
-c_down = OperSequence(0)
-c_up = OperSequence(2)
-a_up = ~c_up
-a_down = ~c_down
+from FockSystem.FockSystem import OperSequence, c_down, c_up, a_down, a_up
+
 def kitaev_chain(N):
    
     ECT,MU,CAR = OperSequence(),OperSequence(),OperSequence()

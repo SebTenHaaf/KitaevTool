@@ -50,13 +50,13 @@ def operator_from_string(type_str):
 
 def construct_operator(position: int, spin: int, annihilation: bool = True):
     """
-    Creates the integer representing an operator. The first bits store the bit position of
-    the operator to act on, which depends on position and spin
-    The largest bit is set or unset depending on whether it stores a creation or annihilation operator
+    Creates the integer representing an operator.
+    The smallest bit is set or unset depending on whether it stores a creation or annihilation operator
+    The remaining bits store the bit position of the operator to act on, which depends on position and spin
     Args:
         position (int): fermionic site of operator to act on
         spin (int): 0 = spin down, 1 = spin up
-        creation(bool): True = creation, False = annihiliation
+        annihilation(bool): True = annihilation, False = creation
 
     Returns:
         oper (int): integer representing an operator
@@ -93,7 +93,7 @@ class FockSystemBase:
 
         ## Calculate relative signs of the operator
         parity_bits = states & (flip_bit-1) 
-        signs = hamming_weight(states & parity_bits) & 0b1
+        signs = hamming_weight(parity_bits) & 0b1
         signs = signs * -2 + 1
 
         ## Flip the bit that the operator acts on
@@ -103,8 +103,8 @@ class FockSystemBase:
         destroyed = ((flip_bit & states) == 0) == check_bit
         new_states[
             destroyed
-        ] = -1  ## -1 = destroyed state (0 is already taken by the empty state)
-        ## Benefit: any state *-1 will also be <0
+        ] = -1  ## -1 = destroyed state (0 is the empty state)
+        ## Any state *-1 will also be < 0, so it still acts as destruction state
         return new_states, signs
 
     def act_oper_list(self, oper_list, states, rel_sign=1):
@@ -242,9 +242,10 @@ class FockSystemBase:
     def vis_oper_list(self, oper_list:List[List[int]], displ: bool=False):
         """
         Convert a sequence of operators to a readable string
-        """
+        """        
+        if len(oper_list) == 0:
+            return "$\\hat{I}$"
         full_str = ""
-
         for oper in list(reversed(oper_list)):
             full_str += self.vis_oper(oper)
         if displ:

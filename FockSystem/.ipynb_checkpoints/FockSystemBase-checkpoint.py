@@ -93,7 +93,7 @@ class FockSystemBase:
 
         ## Calculate relative signs of the operator
         parity_bits = states & (flip_bit-1) 
-        signs = hamming_weight(states & parity_bits) & 0b1
+        signs = hamming_weight(parity_bits) & 0b1
         signs = signs * -2 + 1
 
         ## Flip the bit that the operator acts on
@@ -103,8 +103,8 @@ class FockSystemBase:
         destroyed = ((flip_bit & states) == 0) == check_bit
         new_states[
             destroyed
-        ] = -1  ## -1 = destroyed state (0 is already taken by the empty state)
-        ## Benefit: any state *-1 will also be <0
+        ] = -1  ## -1 = destroyed state (0 is the empty state)
+        ## But: any state *-1 will also be < 0, so it still acts as destruction state
         return new_states, signs
 
     def act_oper_list(self, oper_list, states, rel_sign=1):

@@ -5,7 +5,7 @@ from copy import deepcopy
 from functools import partial
 from scipy.sparse import coo_array,csr_array
 from collections import Counter
-
+import sympy
 from IPython.core.display import Markdown
 from IPython.display import display
 
@@ -46,7 +46,7 @@ class FockStates(FockSystemBase):
     def _repr_markdown_(self) -> str:
         info_string = f'Fock basis with {len(self.states)} states<br>'
         info_string = f' '
-
+        ## TODO - only print summary of the number of non-zero weights is small
         if len(self.states) > 32:
             return info_string + self.vis_state_list(self.states[:5], self.weights[:5], N=self.N)[1:] + "$\\cdots$ " + self.vis_state_list(self.states[-5:], self.weights[-5:], N=self.N) 
         return info_string + self.vis_state_list(self.states, self.weights, N=self.N)[0:]
@@ -340,7 +340,7 @@ class OperSequence(FockSystemBase):
         Initialise a sequence of operators with specified weights
 
         """
-        ## For internally created OperSequence objects, directly load data
+        ## For internally created OperSequence objects, directly load data without parsing
         if bypass_parse:
             self.oper_list = operators[0]
             self.weights = (
@@ -348,18 +348,23 @@ class OperSequence(FockSystemBase):
             )
             return
 
-        ## Parse the input operators and check shape of input weights if provided
+        ## Otherwise parse the input operators and check shape of input weights if provided
         parsed_operators = self.parse_operator_input(*operators)
+        self.oper_list = parsed_operators
+            
         if weights is not None:
             if len(weights) != len(parsed_operators):
                 raise ValueError("Length of provided weights does not match number of subsequences")
-        self.oper_list = parsed_operators
+
         self.weights = (
             weights if weights is not None else [1 for i in range(len(self.oper_list))]
         )
 
     @staticmethod
     def _format_weight_for_repr(w: complex) -> str :
+        if isinstance(w, sympy.Basic):
+            return " $+$ "+f'({w._repr_latex_()})'
+        
         w_str = ""
         ## w purely real
         if w.imag == 0 and w.real != 0:
@@ -392,11 +397,15 @@ class OperSequence(FockSystemBase):
 
     def _repr_markdown_(self):
         operstr = ""
+        ## Return Zero symbol for empty operator
+        if len(self.oper_list) == 0:
+            return "$\\hat{0}$"
+        
+        ## Otherwise build the string by iterating through the subsequences and weights
         for w, oper_seq in zip(self.weights, self.oper_list):
-            if isinstance(oper_seq, list):
-                operstr += self._format_weight_for_repr(w) + self.vis_oper_list(oper_seq)
-            else:
-                operstr += " $+$ " + f"{w*oper_seq}"
+            operstr += self._format_weight_for_repr(w) + self.vis_oper_list(oper_seq)
+        
+        ## Remove the first " $+$ " for formatting purposes
         if operstr[0:4] == " $+$":
             return operstr[4:]
         return operstr
@@ -441,7 +450,6 @@ class OperSequence(FockSystemBase):
             handler_func_name = self._parseinput_handlers.get(type(op), '_handle_parse_default')
             handler_func = getattr(self,handler_func_name)
             output_list.append(handler_func(op))
-
         return output_list
 
     @staticmethod
@@ -449,8 +457,8 @@ class OperSequence(FockSystemBase):
         raise TypeError("You done goofed boy")
 
     @staticmethod
-    def _parse_int(operator_int: int) -> List[int]:
-        return [operator_int]
+    def _parse_int(operator_int: int) -> List[List]:
+        return []
     
     @staticmethod
     def _parse_str(operator_str: str) -> List[int]:
@@ -592,61 +600,72 @@ class OperSequence(FockSystemBase):
     #####             OPERATOR ARITHMETIC            #####
     ######################################################
 
-    def __add__(self, oper_sequence):            
-        if not isinstance(oper_sequence, (self.__class__,int,float,complex)):
-            raise TypeError(f"Unsupported operand type(s) for +: {self.__class__.__name__} and '{type(oper_sequence).__name__}'")
+    ## Specify the non-OperSequence types that are allowed to be added/multiplied to an OperSequence
+    _allowed_types =(int,float,complex,sympy.Basic)
+
+    def __add__(self, oper_sequence):      
+        if not isinstance(oper_sequence, (self.__class__,*self._allowed_types)):
+            raise TypeError(f"Unsupported operand type(s) for +: {self.__class__.__name__} and '{type(oper_sequence).__name__}'")      
+
         new_weights, new_oper_list = [],[]
         new_weights.extend(self.weights)
         new_oper_list.extend(self.oper_list)
-        if isinstance(oper_sequence, (int,float,complex)):
-            new_weights.append(oper_sequence)
-            new_oper_list.append(1)
-        else:
+        if isinstance(oper_sequence, self.__class__):
             new_weights.extend(oper_sequence.weights)
             new_oper_list.extend(oper_sequence.oper_list)
+        else:
+            new_weights.append(oper_sequence)
+            new_oper_list.append([]) ## Empty list corresponds to identity operator
+      
         result = OperSequence(new_oper_list, weights = new_weights, bypass_parse=True)
         result.merge_terms()
         return result
 
     def __iadd__(self, oper_sequence):
-        if not isinstance(oper_sequence, (self.__class__,int,float,complex)):
-            raise TypeError(f"Unsupported operand type(s) for +: {self.__class__.__name__} and '{type(oper_sequence).__name__}'")
-        if isinstance(oper_sequence, (int,float,complex)):
-            self.weights.append(oper_sequence)
-            self.oper_list.append(1)
-        else:
+        if not isinstance(oper_sequence, (self.__class__,*self._allowed_types)):
+            raise TypeError(f"Unsupported operand type(s) for +: {self.__class__.__name__} and '{type(oper_sequence).__name__}'")      
+
+        if isinstance(oper_sequence, self.__class__):
             self.weights.extend(oper_sequence.weights)
             self.oper_list.extend(oper_sequence.oper_list)
+
+        else:
+            self.weights.append(oper_sequence)
+            self.oper_list.append([]) ## Empty list corresponds to identity operator
+     
         self.merge_terms()
         return self
 
     def __sub__(self, oper_sequence):
-        if not isinstance(oper_sequence, (self.__class__,int,float,complex)):
-            raise TypeError(f"Unsupported operand type(s) for +: {self.__class__.__name__} and '{type(oper_sequence).__name__}'")
+        if not isinstance(oper_sequence, (self.__class__,*self._allowed_types)):
+            raise TypeError(f"Unsupported operand type(s) for +: {self.__class__.__name__} and '{type(oper_sequence).__name__}'")      
+
         new_weights = []
         new_oper_list = []
         new_weights.extend(self.weights)
         new_oper_list.extend(self.oper_list)
-        if isinstance(oper_sequence, (int,float,complex)):
-            new_weights.append(-oper_sequence)
-            new_oper_list.append(1)
-        else:
+        if isinstance(oper_sequence, self.__class__):
             new_weights.extend([-1 * w for w in oper_sequence.weights])
-            new_oper_list.extend(oper_sequence.oper_list)
+            new_oper_list.extend(oper_sequence.oper_list)   
 
+        else:
+            new_weights.append(-oper_sequence)
+            new_oper_list.append([]) ## Empty list corresponds to identity operator
+       
         result = OperSequence(new_oper_list, weights = new_weights, bypass_parse=True)
         result.merge_terms()
         return result
 
     def __isub__(self, oper_sequence):
-        if not isinstance(oper_sequence, (self.__class__,int,float,complex)):
-            return
-        if isinstance(oper_sequence, (int,float,complex)):
-            self.weights.append(-oper_sequence)
-            self.oper_list.append(1)
-        else:
-            self.oper_list.extend(oper_sequence.oper_list)
+        if not isinstance(oper_sequence, (self.__class__,*self._allowed_types)):
+            raise TypeError(f"Unsupported operand type(s) for +: {self.__class__.__name__} and '{type(oper_sequence).__name__}'")      
+
+        if isinstance(oper_sequence, self.__class__):
             self.weights.extend([-1 * w for w in oper_sequence.weights])
+            self.oper_list.extend(oper_sequence.oper_list)
+        else:
+            self.weights.append(-oper_sequence)
+            self.oper_list.append([]) ## Empty list corresponds to identity operator
         self.merge_terms()
         return self
 
@@ -662,26 +681,28 @@ class OperSequence(FockSystemBase):
         if not isinstance(exponent, int):
             return self
         product = deepcopy(self)
-        for i in range(1, exponent):
+        for _ in range(1, exponent):
             product *= self
         return product
 
     def __ipow__(self, exponent: int) -> Self:
         if not isinstance(exponent, int):
             return self
-        for i in range(1, exponent):
+        for _ in range(1, exponent):
             self *= self
         return self
 
     def __mul__(self, multiplier: ["OperSequence",int,float,complex]) -> "OperSequence":
-        if (
-            isinstance(multiplier, int)
-            or isinstance(multiplier, complex)
-            or isinstance(multiplier, float)
-        ):
+        if not isinstance(multiplier, (self.__class__,*self._allowed_types)):
+            raise TypeError(f"Unsupported operand type(s) for *: {self.__class__.__name__} and '{type(multiplier).__name__}'")
+        
+        ### For multiplying by a scalar/Symbol, multiply the weights and return a new OperSequence
+        if not isinstance(multiplier, self.__class__):
             new_weights = [w * multiplier for w in self.weights]
             product = OperSequence(self.oper_list, weights = new_weights,bypass_parse=True)
             return product
+        
+        ### Otherwise, multiply sequences together and clean the result
         product_outcome = self._multiplication_basis(
             self.weights, self.oper_list, multiplier.weights, multiplier.oper_list
         )
@@ -693,22 +714,21 @@ class OperSequence(FockSystemBase):
         return product
 
     def __rmul__(self, multiplier) ->  "OperSequence":
-        if not isinstance(multiplier, (int,float,complex)):
-            raise ValueError(f"Cannot multiply OperSequence with {type(multiplier)}")
-
+        if not isinstance(multiplier, self._allowed_types):
+            raise TypeError(f"Unsupported operand type(s) for *: '{type(multiplier).__name__}' and {self.__class__.__name__}")
         new_weights = [w * multiplier for w in self.weights]
         product = OperSequence(self.oper_list, weights = new_weights, bypass_parse=True)
         return product
 
     def __imul__(self, multiplier) -> Self:
-        if (
-            isinstance(multiplier, int)
-            or isinstance(multiplier, complex)
-            or isinstance(multiplier, float)
-        ):
+        if not isinstance(multiplier, (self.__class__,*self._allowed_types)):
+            raise TypeError(f"Unsupported operand type(s) for *: {self.__class__.__name__} and '{type(multiplier).__name__}'")
+        
+        ### For multiplying by a scalar/Symbol, multiply the weights and return a new OperSequence
+        if not isinstance(multiplier, self.__class__):
             self.weights = [w * multiplier for w in self.weights]
             return self
-
+        ### Otherwise, multiply sequences together and clean the result
         product_outcome = self._multiplication_basis(
             self.weights, self.oper_list, multiplier.weights, multiplier.oper_list
         )
@@ -725,7 +745,7 @@ class OperSequence(FockSystemBase):
         / operator
         Divides the weights of the OperSequence by divisor, returns new OperSequence
         """
-        if not isinstance(divisor, (int,float)):
+        if not isinstance(divisor, self._allowed_types):
             raise TypeError(f"Unsupported operand type(s) for /: {self.__class__.__name__} and '{type(divisor).__name__}'")
         oper_list = self.oper_list[:]
         new_weights = [w/divisor for w in self.weights]
@@ -736,36 +756,26 @@ class OperSequence(FockSystemBase):
         in-place / operator
         Divides the weights of the OperSequence by divisor
         """
-        if not isinstance(divisor, (int,float)):
+        if not isinstance(divisor, self._allowed_types):
             raise TypeError(f"Unsupported operand type(s) for /: {self.__class__.__name__} and '{type(divisor).__name__}'")
         self.weights = [w/divisor for w in self.weights]
         return self
         
     @staticmethod
     def _multiplication_basis(weights_1, oper_list_1, weights_2, oper_list_2):
-        #return fo.multiplication_basis(weights_1,oper_list_1, weights_2, oper_list_2)
+        ### CYTHON VERSION
+        # return fo.multiplication_basis(weights_1,oper_list_1, weights_2, oper_list_2)
+
+        ### PYTHON VERSION
         oper_products = []
         product_weights = []
         for idx_1, oper_seq_1 in enumerate(oper_list_1):
             for idx_2, oper_seq_2 in enumerate(oper_list_2):
-                if isinstance(oper_seq_1, list) and isinstance(oper_seq_2, list):
-                    temp = oper_seq_2.copy()
-                    temp.extend(oper_seq_1)
-                    oper_products.append(temp)
-                    product_weights.append(weights_1[idx_1] * weights_2[idx_2])
-                elif isinstance(oper_seq_1, list):
-                    oper_products.append(oper_seq_1.copy())
-                    product_weights.append(
-                        weights_1[idx_1] * oper_seq_2 * weights_2[idx_2]
-                    )
-                elif isinstance(oper_seq_2, list):
-                    oper_products.append(oper_seq_2.copy())
-                    product_weights.append(
-                        weights_2[idx_2] * oper_seq_1 * weights_1[idx_1]
-                    )
-                else:
-                    oper_products.append(oper_seq_1 * oper_seq_2)
-                    product_weights.append(weights_2[idx_2] * weights_1[idx_1])
+                temp = oper_seq_2.copy()
+                temp.extend(oper_seq_1)
+                oper_products.append(temp)
+                product_weights.append(weights_1[idx_1] * weights_2[idx_2])
+              
         return product_weights, oper_products
 
     def __mod__(self, modulo: int):
@@ -804,10 +814,10 @@ class OperSequence(FockSystemBase):
                 new_opers.append(conjugate_oper)
             new_opers.reverse()
             invert_list.append(new_opers)
-
+            
         inverse = OperSequence(
             invert_list,
-            weights = [w.conjugate() if isinstance(w, complex) else w for w in self.weights],
+            weights = [w.conjugate() if isinstance(w, (complex,sympy.Basic)) else w for w in self.weights],
             bypass_parse=True
         )
         return inverse
@@ -908,7 +918,7 @@ class OperSequence(FockSystemBase):
         for checking equality/inequality in __eq__ and __ne___.
         """
         normalized_operator_list = [
-            tuple(sub) if isinstance(sub, list) else sub for sub in self.oper_list
+            tuple(sub) for sub in self.oper_list
         ]
         normalized_sequence = [
             (w, l) for w, l in zip(self.weights, normalized_operator_list)
@@ -1114,26 +1124,34 @@ class OperSequence(FockSystemBase):
 
     def remove_zero_weight(self) ->  "OperSequence":
         for idx in range(len(self.weights)-1, -1,-1):
-            if abs(np.round(self.weights[idx],13)) == 0.0:
-                self.weights.pop(idx)
-                self.oper_list.pop(idx)
+            if isinstance(self.weights[idx],(int,float,complex)):
+                if abs(np.round(self.weights[idx],13)) == 0.0:
+                    self.weights.pop(idx)
+                    self.oper_list.pop(idx)
+            elif isinstance(self.weights[idx],(sympy.Basic)):
+                if self.weights[idx] == 0:
+                    self.weights.pop(idx)
+                    self.oper_list.pop(idx)
         return self
 
     ## Remove duplicate operators
     def remove_duplicates(self) -> None:
-        self.weights,self.oper_list = fo.remove_duplicates(self.weights,self.oper_list)
-        return
+        ### CYTHON VERSION
+        #self.weights,self.oper_list = fo.remove_duplicates(self.weights,self.oper_list)
+        #return
 
+        ### PYTHON VERSION
         for idx in range(len(self.weights) - 1, -1, -1):
-            if not isinstance(self.oper_list[idx], list):
-                continue
-            elif len(self.oper_list[idx]) != len(set(self.oper_list[idx])):
+            if len(self.oper_list[idx]) != len(set(self.oper_list[idx])):
                 self.oper_list.pop(idx)
                 self.weights.pop(idx)
 
     def merge_terms(self) -> None:
-        self.weights,self.oper_list = fo.merge_terms_cython(self.weights,self.oper_list)
-        return
+        ### CYTHON VERSION
+        #self.weights,self.oper_list = fo.merge_terms_cython(self.weights,self.oper_list)
+        #return
+
+        ### PYTHON VERSION
         merged_weight,merged_list = [],[]
     
         for seq,weight in zip(self.oper_list, self.weights):
@@ -1146,54 +1164,65 @@ class OperSequence(FockSystemBase):
         self.weights,self.oper_list = merged_weight,merged_list
 
     def is_normal_ordered(self):
+        '''
+         Checks if the operator sequence is in normal order
+         Returns True if the sequence is in normal order, False otherwise
+        '''
         for oper_seq in self.oper_list:
-            if isinstance(oper_seq, list):
-                for i in range(len(oper_seq) - 1):
-                    if (oper_seq[i] % 2) < (oper_seq[i + 1] % 2):
-                        return False
-                    elif (oper_seq[i] < oper_seq[i + 1]) and (
-                        (oper_seq[i] % 2) < (oper_seq[i + 1] % 2)
-                    ):
-                        return False
+            for i in range(len(oper_seq) - 1):
+                if (oper_seq[i] % 2) < (oper_seq[i + 1] % 2):
+                    return False
+                elif (oper_seq[i] < oper_seq[i + 1]) and (
+                    (oper_seq[i] % 2) < (oper_seq[i + 1] % 2)
+                ):
+                    return False
         return True
 
     def normal_order(self):
-        self.weights,self.oper_list = fo.normal_order(self.weights,self.oper_list)
-        return 
+        '''
+        Places the operators in normal order
+        accounting for minus signs due to swapping of operators and removal of pairs of creation/annihilation operators.
+            Return None (OperSequence is modified in place)
+        '''
+        ### CYTHON VERSION
+        #self.weights,self.oper_list = fo.normal_order(self.weights,self.oper_list)
+        #return 
 
+        ### PYTHON VERSION
         is_normal_ordered=False
         while not is_normal_ordered:
             is_normal_ordered=True
             for seq_idx, oper_seq in enumerate(self.oper_list):
-                if not isinstance(oper_seq, list):
-                    continue
-
                 n = len(oper_seq)
                 for i in range(n - 1):
                     flag_swap = False
                     for j in range(n - 1 - i):
+                        ## Check if the two operators are in the correct order, if not swap them and update the weight accordingly
                         if (oper_seq[j] % 2) > (oper_seq[j + 1] % 2):
                             continue
+
                         if oper_seq[j] < oper_seq[j + 1] or (oper_seq[j] % 2) < (
                             oper_seq[j + 1] % 2
                         ):
                             is_normal_ordered = False
+                            ## If the two operators are the same, remove them   
                             if (oper_seq[j] ^ 0b1) == oper_seq[j + 1]:
                                 self.oper_list.append(oper_seq[:])
                                 self.weights.append(self.weights[seq_idx] * -1)
-
                                 self.oper_list[seq_idx] = oper_seq[:j] + oper_seq[j + 2 :]
                                 self.oper_list[-1][j], self.oper_list[-1][j + 1] = (
                                     self.oper_list[-1][j + 1],
                                     self.oper_list[-1][j],
                                 )
                                 flag_swap=False
+                                ## If the swap resulted in an empty list, remove the term entirely
                                 if len(self.oper_list[seq_idx]) == 0:
                                     self.weights.append(self.weights[seq_idx])
                                     self.weights.pop(seq_idx)
                                     self.oper_list.pop(seq_idx)
-                                    self.oper_list.append(1)
+                                    self.oper_list.append([])
                                 break
+                            ## If the two operators are not the same, swap them and update the weight by a minus sign
                             else:
                                 flag_swap = True
                                 oper_seq[j], oper_seq[j + 1] = (
@@ -1207,3 +1236,57 @@ class OperSequence(FockSystemBase):
                         break
         return self
 
+
+    def is_hermitian(self):
+        conj = ~self
+        conj.normal_order()
+        return conj == self
+
+    def commute(self,operator_2):
+        commutator = self*operator_2 - operator_2*self
+        commutator.remove_zero_weight()
+        return commutator
+    
+    def anticommute(self,operator_2):
+        anticommutator = self*operator_2 + operator_2*self
+        anticommutator.remove_zero_weight()
+        return anticommutator
+
+    def act_on_state(self, State):
+        states = State.states
+        filt_zero = np.where(State.weights != 0)
+        relevant_states = np.array(states[filt_zero])
+        relevant_phi = State.weights[filt_zero]
+        
+        result_state = np.zeros(len(states),dtype=complex)
+    
+        for operators,oper_weight in zip(self.oper_list,self.weights):
+          
+            new_states = relevant_states
+            new_signs = np.full(len(relevant_states),1)
+            if isinstance(operators,list):
+                for op in operators:
+                    new_states,sign = self.act_oper(op, new_states)
+                    new_signs *= sign
+           
+            weights = np.round(relevant_phi*new_signs*oper_weight,14)
+            row_idx=0
+            for state,weight in zip(new_states,weights):
+                if state>-1 and (state in State.states):
+                    result_state[State.hashed[state]] += weight
+            
+        return FockStates(states = states, weights = result_state)
+
+    def simplify(self):
+        for idx, weight in enumerate(self.weights):
+            self.weights[idx] = sympy.simplify(sympy.expand(weight))
+        self.remove_zero_weight()
+
+
+I = OperSequence(1)
+eye = I
+Zero = OperSequence()
+c_down = OperSequence([0])
+c_up = OperSequence([2])
+a_up = ~c_up
+a_down = ~c_down

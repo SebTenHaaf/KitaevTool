@@ -171,7 +171,7 @@ def wrap_in_xarray(coords, datasets):
         coords=xarray_coord,
     )
     return ds
-def phase_diagram(H, odd_basis, even_basis, subseq_x, x_range, subseq_y, y_range, disable_timer=False):
+def phase_diagram(H, odd_basis, even_basis, subseq_x, x_range, subseq_y, y_range, disable_timer=False, method="linalg"):
     H & odd_basis
     H & even_basis
 
@@ -180,9 +180,17 @@ def phase_diagram(H, odd_basis, even_basis, subseq_x, x_range, subseq_y, y_range
         H[subseq_y] = y_value
         for x_value in x_range:
             H[subseq_x] = x_value
-            E_odd,phi_odd = np.linalg.eigh(H[odd_basis].to_array(), UPLO="U")
-            E_even,phi_even = np.linalg.eigh(H[even_basis].to_array(),  UPLO="U")
-            result_data.append(E_odd[0]-E_even[0])
+            if method == "linalg":
+                E_odd = np.linalg.eigh(H[odd_basis].to_array(), UPLO="U")[0]
+                E_even = np.linalg.eigh(H[even_basis].to_array(),  UPLO="U")[0]
+                result_data.append(E_odd[0]-E_even[0])
+
+            elif method == "sparse":
+                M_odd = LinearOperator((len(odd_basis.states),len(odd_basis.states)), matvec=H[odd_basis].get_sparse_func(), dtype=np.complex128)
+                M_even = LinearOperator((len(even_basis.states),len(even_basis.states)), matvec=H[even_basis].get_sparse_func(),dtype=np.complex128)
+                E_odd = eigsh(M_odd, k=1, which='SA', return_eigenvectors=False,)
+                E_even = eigsh(M_even, k=1, which='SA', return_eigenvectors=False)
+                result_data.append(E_odd[0]-E_even[0])
 
     dataset = wrap_in_xarray({0:[subseq_x, x_range],1:[subseq_y, y_range],},
     {0: ['E','$E_{odd} - E_{even}$', np.reshape(result_data, (len(y_range),len(x_range))), [0,1]]}
@@ -192,7 +200,7 @@ def phase_diagram(H, odd_basis, even_basis, subseq_x, x_range, subseq_y, y_range
 
 
 def lowest_transitions_sorted(
-        H, basis: int,sites, lowest_n_values= 1,
+        H, basis: int,sites, 
     ):
         """
         Set-up for calculating possible single-electron transitions between odd/even ground states and the excited states
@@ -201,7 +209,13 @@ def lowest_transitions_sorted(
         """
         E,phi = np.linalg.eigh(H[basis].data_array,UPLO='U' )
         phi = np.transpose(phi)
-        rows_to_keep = [i for i in range(lowest_n_values)]
+
+        E_difs = E - E[0]
+        rows_to_keep = [0]
+        for i in range(1, len(E_difs)):
+            if E_difs[i] > 0 and E_difs[i] < 4:
+                rows_to_keep.append(i)
+        
         T_all = [[] for i in range(len(sites))]
         weights_all = [[] for i in range(len(sites))]
         Es_a, Es_b = np.meshgrid(E, E)
@@ -215,15 +229,19 @@ def lowest_transitions_sorted(
             Tsq_plus = np.abs(basis.bra_oper_ket(basis.states, phi, operators)) ** 2
             Tsq_minus = Tsq_plus.T
 
-            T_all[idx].extend(Es_ba[rows_to_keep].flatten())
-            T_all[idx].extend(-Es_ba[rows_to_keep].flatten())
-            weights_all[idx].extend(Tsq_plus[rows_to_keep].flatten())
-            weights_all[idx].extend(Tsq_minus[rows_to_keep].flatten())
+           
+            for r in rows_to_keep:
+                weight_factor = np.round(np.exp(-(E[r]-E[0])), 8)
+                if weight_factor >0:
+                    T_all[idx].extend(Es_ba[r])
+                    T_all[idx].extend(-Es_ba[r])
+                    weights_all[idx].extend(Tsq_plus[r]*weight_factor) ## Weight by Boltzmann factor of initial state
+                    weights_all[idx].extend(Tsq_minus[r]*weight_factor)  ## Weight by Boltzmann factor of initial state
 
         filtered_T_all = [[] for i in range(len(sites))]
         filtered_weights = [[] for i in range(len(sites))]
         for idx in range(len(sites)):
-            filter_zeros = np.where(np.array(weights_all[idx]) > 0)[0]
+            filter_zeros = np.where(np.round(np.array(weights_all[idx]),8) > 0)[0]
             filtered_T_all[idx] = np.array(T_all[idx])[filter_zeros]
             filtered_weights[idx] = np.array(weights_all[idx])[filter_zeros]
 
@@ -238,7 +256,7 @@ def energy_spectrum(H,basis, param_seq, param_range, sites, fig, axs, plot=True)
     for v_idx in tqdm(np.arange(len(param_range))):
         H[param_seq] = param_range[v_idx]
 
-        energies, weights = lowest_transitions_sorted(H,basis,sites, lowest_n_values=1)
+        energies, weights = lowest_transitions_sorted(H,basis,sites)
         for i in range(len(sites)):
             all_energies[i].extend(energies[i])
             all_weights[i].extend(weights[i])
@@ -263,8 +281,8 @@ def energy_spectrum(H,basis, param_seq, param_range, sites, fig, axs, plot=True)
 
 def plot_energy_spectrum(fix, ax, mu, energies, weights, xval, site):
     weights = np.abs(weights)
-    weights = np.minimum(weights, 1)
-    ax.scatter(mu, energies, alpha=np.abs(weights), s=3, color="black")
+    weights = weights/np.max(weights)
+    ax.scatter(mu, energies, alpha=np.abs(weights), s=1, color="black")
     ax.set_title(f"Spectum site {site}")
     ax.set_ylabel(f"E")
 
@@ -284,7 +302,7 @@ def rate_equation(
         ## For each desired site, get transition rate matrix
         for site in sites:
             operators = [
-                [operator_verbose("creation", site, "down")],
+                [operator_verbose("creation", site, "up")],
                 [operator_verbose("creation", site, "down")],
             ]  ## Create spin-up and spin-down
 
@@ -341,6 +359,7 @@ def rate_equation(
                 gs = 2 * np.pi * (Is1 - Is0) / (2 * lead_params["dV"])
                 G_matrix[:, j, i] = gs
         return G_matrix
+        
 def charge_stability_diagram(H,  basis, subseq_x, x_range, subseq_y, y_range,sites=[0, 1],lead_params={},  n_values = 100, disable_timer=False):
 
     n_sites = len(sites)

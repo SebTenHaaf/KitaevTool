@@ -3,23 +3,19 @@ import numpy as np
 import sys,os,json
 from copy import deepcopy
 from functools import partial
-from scipy.sparse import coo_array
+from scipy.sparse import coo_array,csr_array
 from collections import Counter
-
+import sympy
 from IPython.core.display import Markdown
 from IPython.display import display
 
 from .FockSystemBase import FockSystemBase, hamming_weight, operator_verbose,operator_from_string
-from .FockSystemSparse import FockOperVerySparse,FockStatesVerySparse
+from .FockSystemSparse import OperSequenceDataSparse,FockStatesSparse
 from .c import fermion_operations as fo
 
 
 from typing import Callable, List, Any, Self
 
-
-class FockStatesVerySparse(FockSystemBase):
-    def __init__(self):
-        return
 
 class FockStates(FockSystemBase):
     def __init__(self, states, weights=None, N: int=None):
@@ -34,6 +30,10 @@ class FockStates(FockSystemBase):
             N = int(np.ceil(np.log2(np.max(self.states)+1)/2))
         self.N = N
 
+        ## TODO This flag is not correct now, be smarter about it
+        ## Ideally one does not calculate the hash dictionary if the fock states are fock ordered
+        self.is_ordered = True if len(self.states) == 4**N else False
+
     @staticmethod
     def _parse_states(states: [int,List,np.ndarray]):
         if isinstance(states,int):
@@ -46,7 +46,7 @@ class FockStates(FockSystemBase):
     def _repr_markdown_(self) -> str:
         info_string = f'Fock basis with {len(self.states)} states<br>'
         info_string = f' '
-
+        ## TODO - only print summary of the number of non-zero weights is small
         if len(self.states) > 32:
             return info_string + self.vis_state_list(self.states[:5], self.weights[:5], N=self.N)[1:] + "$\\cdots$ " + self.vis_state_list(self.states[-5:], self.weights[-5:], N=self.N) 
         return info_string + self.vis_state_list(self.states, self.weights, N=self.N)[0:]
@@ -65,7 +65,9 @@ class FockStates(FockSystemBase):
         Args:
             Ez_inf (bool): If True, excludes states with a 'spin up' set
             U_inf (bool): If True, excludes states with both 'spin up' and 'spin down' set for a single site
-            parity: 
+            parity (str): If 'even', returns only states with even parity, 
+                             If 'odd', returns only states with odd parity, 
+                             If None, returns all states
         """
         all_states = self.states
 
@@ -108,13 +110,13 @@ class OperSequenceData():
 
     Implements conversion to numpy arrays (.to_array()) or scipy coo_matrix format (.to_sparse_coo())
 
-    Args:
+    Attrs:
         fock_basis (FockStates): the FockStates instance for which the data was generated.
         rows (np.ndarray[int]): row indices of non-zero elements
         cols (np.ndarray[int]): column indices of non-zero elements
         values (np.ndarray[complex]): values of non-zero elements
         parities (np.ndarray[int]): the sign under action of operators giving rise to a non-zero element
-        type-string (np.ndarray[str]): string encoding of operators giving rise to a non-zero element
+        type_strings (np.ndarray[str]): string encoding of operators giving rise to a non-zero element
         data_array (Optional np.ndarray[complex]): full numpy array generated from rows,cols and values
 
     """
@@ -187,7 +189,7 @@ class OperSequenceData():
         array_size = len(self.fock_basis.states)
     
         arr = np.zeros((array_size, array_size), dtype=complex)
-        idx = 0
+
         filter_diagonal = np.where(self.rows!=self.cols)
         rows = np.append(self.rows, self.cols[filter_diagonal])
         cols = np.append(self.cols, self.rows[filter_diagonal])
@@ -199,14 +201,35 @@ class OperSequenceData():
         return arr
 
     def to_sparse_coo(self) -> coo_array:
+        """
+        Converts the OperSequenceData to a sparse COO matrix format.
+        Returns:
+            coo_array: A sparse matrix in COO format.
+        """
         N = len(self.fock_basis.states)
         filter_diagonal = np.where(self.rows!=self.cols)
         rows = np.append(self.rows, self.cols[filter_diagonal])
         cols = np.append(self.cols, self.rows[filter_diagonal])
         vals = np.append(self.values * self.parities, np.conj(self.values[filter_diagonal]) * self.parities[filter_diagonal])
         return coo_array((vals, (rows, cols)), shape=(N, N))
-
+    
+    def to_sparse_csr(self) -> csr_array:
+        """
+        Converts the OperSequenceData to a sparse CSR matrix format.
+        Returns:
+            csr_array: A sparse matrix in CSR format.
+        """
+        N = len(self.fock_basis.states)
+        filter_diagonal = np.where(self.rows!=self.cols)
+        rows = np.append(self.rows, self.cols[filter_diagonal])
+        cols = np.append(self.cols, self.rows[filter_diagonal])
+        vals = np.append(self.values * self.parities, np.conj(self.values[filter_diagonal]) * self.parities[filter_diagonal])
+        return csr_array((vals, (rows, cols)), shape=(N, N))
+    
     def connected_components(self)-> List[List[int]]:
+        """
+        Calculate the connected components of the FockStates represented by this OperSequenceData.
+        """
         idx =[[0]]
         components = [[self.rows[0],self.cols[0]]]
         for r,c in zip(self.rows[1:],self.cols[1:]):
@@ -234,6 +257,9 @@ class OperSequenceData():
 
 
     def to_block_diagonal_basis(self) -> FockStates:
+        """
+        Calculate a new order for the basis such that the system is block diagonal
+        """
         components = self.connected_components()
         reverse_hash = []
         for key in self.fock_basis.hashed.keys():
@@ -334,6 +360,8 @@ class OperSequence(FockSystemBase):
 
     @staticmethod
     def _format_weight_for_repr(w: complex) -> str :
+        if isinstance(w, sympy.Basic):
+            return " $+$ "+f'({w._repr_latex_()})'
         w_str = ""
         ## w purely real
         if w.imag == 0 and w.real != 0:
@@ -370,7 +398,7 @@ class OperSequence(FockSystemBase):
             if isinstance(oper_seq, list):
                 operstr += self._format_weight_for_repr(w) + self.vis_oper_list(oper_seq)
             else:
-                operstr += " $+$ " + f"{w*oper_seq}"
+                operstr += " $+$ " + f"{self._format_weight_for_repr(w)*oper_seq}"
         if operstr[0:4] == " $+$":
             return operstr[4:]
         return operstr
@@ -468,7 +496,7 @@ class OperSequence(FockSystemBase):
         return all(item in self.oper_list for item in subsequence.oper_list)
 
     def __getitem__(self,indexing) -> "OperSequence":
-        if isinstance(indexing, (sys.modules[__name__].FockStates,sys.modules[__name__].FockStatesVerySparse)):
+        if isinstance(indexing, (sys.modules[__name__].FockStates,sys.modules[__name__].FockStatesSparse)):
             if not hasattr(self,'basis_dict'):
                 return self.__and__(indexing)
             if indexing not in self.basis_dict:
@@ -567,7 +595,7 @@ class OperSequence(FockSystemBase):
     ######################################################
 
     def __add__(self, oper_sequence):            
-        if not isinstance(oper_sequence, (self.__class__,int,float,complex)):
+        if not isinstance(oper_sequence, (self.__class__,int,float,complex,sympy.Basic)):
             raise TypeError(f"Unsupported operand type(s) for +: {self.__class__.__name__} and '{type(oper_sequence).__name__}'")
         new_weights, new_oper_list = [],[]
         new_weights.extend(self.weights)
@@ -583,9 +611,9 @@ class OperSequence(FockSystemBase):
         return result
 
     def __iadd__(self, oper_sequence):
-        if not isinstance(oper_sequence, (self.__class__,int,float,complex)):
+        if not isinstance(oper_sequence, (self.__class__,int,float,complex,sympy.Basic)):
             raise TypeError(f"Unsupported operand type(s) for +: {self.__class__.__name__} and '{type(oper_sequence).__name__}'")
-        if isinstance(oper_sequence, (int,float,complex)):
+        if isinstance(oper_sequence, (int,float,complex,sympy.Basic)):
             self.weights.append(oper_sequence)
             self.oper_list.append(1)
         else:
@@ -652,6 +680,7 @@ class OperSequence(FockSystemBase):
             isinstance(multiplier, int)
             or isinstance(multiplier, complex)
             or isinstance(multiplier, float)
+            or isinstance(multiplier, sympy.Basic)
         ):
             new_weights = [w * multiplier for w in self.weights]
             product = OperSequence(self.oper_list, weights = new_weights,bypass_parse=True)
@@ -667,7 +696,7 @@ class OperSequence(FockSystemBase):
         return product
 
     def __rmul__(self, multiplier) ->  "OperSequence":
-        if not isinstance(multiplier, (int,float,complex)):
+        if not isinstance(multiplier, (int,float,complex, sympy.Basic)):
             raise ValueError(f"Cannot multiply OperSequence with {type(multiplier)}")
 
         new_weights = [w * multiplier for w in self.weights]
@@ -778,10 +807,10 @@ class OperSequence(FockSystemBase):
                 new_opers.append(conjugate_oper)
             new_opers.reverse()
             invert_list.append(new_opers)
-
+            
         inverse = OperSequence(
             invert_list,
-            weights = [w.conjugate() if isinstance(w, complex) else w for w in self.weights],
+            weights = [w.conjugate() if isinstance(w, (complex,sympy.Basic)) else w for w in self.weights],
             bypass_parse=True
         )
         return inverse
@@ -920,7 +949,7 @@ class OperSequence(FockSystemBase):
         Shorthand code to generate an OperSequenceData object for a specified FockStates object.
         """
 
-        if not isinstance(fock_states, (sys.modules[__name__].FockStates,sys.modules[__name__].FockStatesVerySparse)):
+        if not isinstance(fock_states, (sys.modules[__name__].FockStates,sys.modules[__name__].FockStatesSparse)):
             raise ValueError(f'Cannot bind OperSequence to {type(fock_states)}')
         if not hasattr(self,'basis_dict'):
             self.basis_dict={}
@@ -929,14 +958,15 @@ class OperSequence(FockSystemBase):
             return
         else:
             if isinstance(fock_states, sys.modules[__name__].FockStates):
-                sparse_data = self._construct_sparse_repr(fock_states)
+                sparse_data = self._construct_data_repr(fock_states)
                 self.basis_dict[fock_states] = OperSequenceData(sparse_data,fock_states)
                 return self.basis_dict[fock_states]
-            if isinstance(fock_states, sys.modules[__name__].FockStatesVerySparse):
-                self.basis_dict[fock_states] = FockOperVerySparse(fock_states, self.oper_list,self.weights)
+            if isinstance(fock_states, sys.modules[__name__].FockStatesSparse):
+                very_sparse_data = self._construct_sparse_data_repr(fock_states.N)
+                self.basis_dict[fock_states] = OperSequenceDataSparse(fock_states, very_sparse_data)
                 return self.basis_dict[fock_states]
        
-    def _construct_sparse_repr(self,fock_states):
+    def _construct_data_repr(self,fock_states):
         """
         Applies the stored hamiltonian to a set of Fock states
         Returns:
@@ -952,16 +982,23 @@ class OperSequence(FockSystemBase):
                 old_states, new_states, parities = self.act_oper_list(
                     h, fock_states.states, rel_sign=1
                 )
-                subspace_filt = [state in fock_states.hashed for state in new_states]
-                old_states = old_states[subspace_filt]
-                new_states = new_states[subspace_filt]
-                parities = parities[subspace_filt]
+                if not fock_states.is_ordered:
+                    subspace_filt = [state in fock_states.hashed for state in new_states]
+                    old_states = old_states[subspace_filt]
+                    new_states = new_states[subspace_filt]
+                    parities = parities[subspace_filt]
 
-                types.extend([type_str] * len(parities))
-                rows.extend([fock_states.hashed.get(state) for state in old_states])
-                cols.extend([fock_states.hashed.get(state) for state in new_states])
-                pars.extend(parities.tolist())
-                vals.extend([w for _ in range(len(parities))])
+                    types.extend([type_str] * len(parities))
+                    rows.extend([fock_states.hashed.get(state) for state in old_states])
+                    cols.extend([fock_states.hashed.get(state) for state in new_states])
+                    pars.extend(parities.tolist())
+                    vals.extend([w for _ in range(len(parities))])
+                else:
+                    types.extend([type_str] * len(parities))
+                    rows.extend(old_states)
+                    cols.extend(new_states)
+                    pars.extend(parities)
+                    vals.extend([w for _ in range(len(parities))])
 
         list_1, list_2 = map(
             list,
@@ -982,6 +1019,60 @@ class OperSequence(FockSystemBase):
             np.array(types,dtype=str),
             np.array(vals, dtype = complex)
         )
+    
+    def _construct_sparse_data_repr(self, N):
+        big_N = 4**N
+        ## (1) Map each subsequence to a base element
+        base_set_list = [] ## Set of minimal elements
+        order_list = [] ## Order of the operator
+        for i in range(len(self.oper_list)):
+            subseq = self[i]
+            sub_list = np.array(subseq.oper_list[0])
+            sub_list -= ((np.min(sub_list) >> 2) * 4) ## Shift sequence to minimal form
+            oper_order = (np.max(sub_list)>>2)-(np.min(sub_list)>>2) ## calculate 'order' of the sequence
+            
+            if list(sub_list) not in base_set_list:
+                base_set_list.append(list(sub_list))
+                order_list.append(int(oper_order))
+                
+        ## (2) Use the base set and orders to construct the minimal info needed for matvec
+        h_vals = []
+        h_types = []
+        h_rc_data = []
+
+        for order,base_set in zip(order_list,base_set_list):
+            oper_as_sequence = OperSequence(list(base_set[::-1]))        
+            ## Calculate the relevant indices in the smallest possible subsystem
+            basis = FockStates(order+1)
+            operseq_data = oper_as_sequence[basis]
+
+            ## Shift the subsystem over the entire system
+            ## Checking if the term indeed exists along the way and grabbing the correct values
+            for row,col,parity in zip(operseq_data.rows,operseq_data.cols,operseq_data.parities):
+                start_i = row
+                start_j = col
+                ## Can shift a sequence N-order times before going out of bounds
+                for shift_idx in range(0, N-order):
+                    shifted_sequence = oper_as_sequence >> shift_idx
+                    ## Check if the sequence actually should be stored (store only if original H contains it)
+                    if shifted_sequence in self:
+                        val = self.weights[self.oper_list.index(shifted_sequence.oper_list[0])]*parity ## grab value of the operator
+                        type_string = shifted_sequence.oper_list_to_str(shifted_sequence.oper_list[0])
+                        if (start_i < big_N and start_j < big_N):
+                            if start_i == start_j:
+                                h_vals.append(val/2)
+                            else:
+                                h_vals.append(val)
+
+                            ## Stores: [starting_i, starting_j, number of small reps, number of big reps, spacing between big reps]
+                            ## The latter 3 depend on the order of the sequence, the size of the array and the shifts that have been done
+                            h_rc_data.append([start_i,start_j, 4**(shift_idx), int(4**(N-(order+1)-shift_idx)), 4**(shift_idx+order+1)]) 
+                            h_types.append(type_string)
+                    start_i <<= 2
+                    start_j <<= 2
+        return np.array(h_vals, dtype=np.float64),np.array(h_rc_data,dtype=np.int64), np.array(h_types)
+
+        
     
     ###########################################################
     #####     ORDERING AND CLEANING OPERATOR SEQUENCE     #####
@@ -1026,9 +1117,14 @@ class OperSequence(FockSystemBase):
 
     def remove_zero_weight(self) ->  "OperSequence":
         for idx in range(len(self.weights)-1, -1,-1):
-            if abs(np.round(self.weights[idx],13)) == 0.0:
-                self.weights.pop(idx)
-                self.oper_list.pop(idx)
+            if isinstance(self.weights[idx],(int,float,complex)):
+                if abs(np.round(self.weights[idx],13)) == 0.0:
+                    self.weights.pop(idx)
+                    self.oper_list.pop(idx)
+            elif isinstance(self.weights[idx],(sympy.Basic)):
+                if self.weights[idx] == 0:
+                    self.weights.pop(idx)
+                    self.oper_list.pop(idx)
         return self
 
     ## Remove duplicate operators
@@ -1118,4 +1214,50 @@ class OperSequence(FockSystemBase):
                     if not flag_swap:
                         break
         return self
+
+
+    def is_hermitian(self):
+        conj = ~self
+        conj.normal_order()
+        return conj == self
+
+    def commute(self,operator_2):
+        commutator = self*operator_2 - operator_2*self
+        commutator.remove_zero_weight()
+        return commutator
+    
+    def anticommute(self,operator_2):
+        anticommutator = self*operator_2 + operator_2*self
+        anticommutator.remove_zero_weight()
+        return anticommutator
+
+    def act_on_state(self, State):
+        states = State.states
+        filt_zero = np.where(State.weights != 0)
+        relevant_states = np.array(states[filt_zero])
+        relevant_phi = State.weights[filt_zero]
+        
+        result_state = np.zeros(len(states),dtype=complex)
+    
+        for operators,oper_weight in zip(self.oper_list,self.weights):
+          
+            new_states = relevant_states
+            new_signs = np.full(len(relevant_states),1)
+            if isinstance(operators,list):
+                for op in operators:
+                    new_states,sign = self.act_oper(op, new_states)
+                    new_signs *= sign
+           
+            weights = np.round(relevant_phi*new_signs*oper_weight,14)
+            row_idx=0
+            for state,weight in zip(new_states,weights):
+                if state>-1 and (state in State.states):
+                    result_state[State.hashed[state]] += weight
+            
+        return FockStates(states = states, weights = result_state)
+
+    def simplify(self):
+        for idx, weight in enumerate(self.weights):
+            self.weights[idx] = sympy.simplify(sympy.expand(weight))
+        self.remove_zero_weight()
 
