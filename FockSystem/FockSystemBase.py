@@ -6,21 +6,6 @@ from typing import List
 def printmd(item):
     display(Markdown(item._repr_markdown))
 
-def hamming_weight(states: np.ndarray):
-    """
-    Constant-time, vectorized method for counting number of 1's in a number in binary.
-    Works up to 32-bit integers.
-
-    Shoutout to stackoverflow.
-
-    Args:
-        states (np.ndarray): Array of integers
-    Returns:
-        np.ndarray: Number of 1's in each inputs' binary representation
-    """
-    count = states - ((states >> 1) & 0o33333333333) - ((states >> 2) & 0o11111111111)
-    return ((count + (count >> 3)) & 0o30707070707) % 63
-
 def operator_verbose(type_str: str, position: int, spin: str):
     """
     Verbose method for constructing an operator, passes the call on to
@@ -91,23 +76,17 @@ class FockSystemBase:
         flip_bit_pos = oper >> 1
         flip_bit = 1 << flip_bit_pos
 
+        ## Check which states are alive
+        states_alive_filt = ((states >> flip_bit_pos) & 1) != check_bit
+        states_alive = states[states_alive_filt]
+        
         ## Calculate relative signs of the operator
-        parity_bits = states & (flip_bit-1) 
-        signs = hamming_weight(parity_bits) & 0b1
-        signs = signs * -2 + 1
-
-        ## Flip the bit that the operator acts on
-        new_states = states ^ flip_bit
-
-        ## Check the original state of the flipped bit with the creation/annihilation bit
-        destroyed = ((flip_bit & states) == 0) == check_bit
-        new_states[
-            destroyed
-        ] = -1  ## -1 = destroyed state (0 is the empty state)
-        ## Any state *-1 will also be < 0, so it still acts as destruction state
-        return new_states, signs
-
-    def act_oper_list(self, oper_list, states, rel_sign=1):
+        signs = 1-2*(np.bitwise_count(states_alive & (flip_bit-1) ) & 0b1).astype(np.int8)
+        
+        ## Return the filter for alive states, the new states and their signs
+        return states_alive_filt, states_alive ^ flip_bit, signs
+   
+    def act_oper_list(self, oper_list, states):
         """
         Apply a sequence of operators to a list of states,
         removes any 'destroyed' terms
@@ -120,17 +99,20 @@ class FockSystemBase:
             new_states: resulting new states
             signs: relative sign after applying the sequence of operators
         """
-        signs = np.full(len(states), 1)
         new_states = states
-        for oper in oper_list:
-            new_states, new_parity = self.act_oper(oper, new_states)
-            filter_states = np.where(new_states > -1)
-            new_states = new_states[filter_states]
-            signs = signs[filter_states]
-            new_parity = new_parity[filter_states]
-            states = states[filter_states]
-            signs *= new_parity
-        return states, new_states, signs * rel_sign
+        for idx,oper in enumerate(oper_list):
+            states_alive_filt, new_states, new_parity = self.act_oper(oper, new_states)
+            if idx==0:
+                signs = new_parity
+            else:
+                signs = signs[states_alive_filt]*new_parity
+            states = states[states_alive_filt]
+        return states, new_states, signs
+
+        #else:
+        #    states_alive_filt, new_states, signs_new = self.act_two_opers(oper_list[0], oper_list[1], states)
+        #    states = states[states_alive_filt]
+        #    return states, new_states, signs_new
 
     @staticmethod
     def normal_order_naive(oper_list: list):
@@ -138,7 +120,6 @@ class FockSystemBase:
         Place sequence of operators in normal order, tracking the sign
         Normal order = sorting the list of integers from smallest to largest
         Sorting done with a bubble sort.
-        To do: handle the presence of same-site operators (for now ignored)
         Args:
             oper_list (list)
         """

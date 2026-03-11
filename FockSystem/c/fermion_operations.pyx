@@ -16,8 +16,8 @@ def merge_terms_cython(list weights, list oper_list):
         seq = oper_list[idx]
         weight = weights[idx]
         # Convert lists to tuples (if seq is a list) for hashability
-        if isinstance(seq, list):
-            seq = tuple(seq)
+        #if isinstance(seq, list):
+        seq = tuple(seq)
 
         if seq not in merged_dict:
             merged_dict[seq] = weight            
@@ -27,10 +27,8 @@ def merge_terms_cython(list weights, list oper_list):
     # Now build the merged list and weights based on merged_dict
     for key in merged_dict.keys():
         # Convert tuple back to list if it was a tuple before
-        if isinstance(key, tuple):
-            merged_list.append(list(key))
-        else:
-            merged_list.append(key)
+        #if isinstance(key, tuple):
+        merged_list.append(list(key))
         merged_weight.append(merged_dict[key])
 
     return merged_weight, merged_list
@@ -140,20 +138,10 @@ def multiplication_basis(
 
     for idx_1, oper_seq_1 in enumerate(oper_list_1):
         for idx_2, oper_seq_2 in enumerate(oper_list_2):
-            if isinstance(oper_seq_1, list) and isinstance(oper_seq_2, list):
-                temp = oper_seq_2.copy()
-                temp.extend(oper_seq_1)
-                oper_products.append(temp)
-                product_weights.append(weights_1[idx_1] * weights_2[idx_2])
-            elif isinstance(oper_seq_1, list):
-                oper_products.append(oper_seq_1.copy())
-                product_weights.append(weights_1[idx_1] * oper_seq_2 * weights_2[idx_2])
-            elif isinstance(oper_seq_2, list):
-                oper_products.append(oper_seq_2.copy())
-                product_weights.append(weights_2[idx_2] * oper_seq_1 * weights_1[idx_1])
-            else:
-                oper_products.append(oper_seq_1 * oper_seq_2)
-                product_weights.append(weights_2[idx_2] * weights_1[idx_1])
+            temp = oper_seq_2.copy()
+            temp.extend(oper_seq_1)
+            oper_products.append(temp)
+            product_weights.append(weights_1[idx_1] * weights_2[idx_2])
 
     return product_weights, oper_products
 
@@ -186,9 +174,6 @@ cpdef tuple normal_order(list weights, list oper_list):
         seq_idx = 0
         is_normal_ordered = True
         while seq_idx < len(oper_list):
-            if not isinstance(oper_list[seq_idx], list): 
-                seq_idx += 1
-                continue
             oper_seq = oper_list[seq_idx]
 
             n = len(oper_seq)
@@ -211,7 +196,7 @@ cpdef tuple normal_order(list weights, list oper_list):
                                 weights.append(weights[seq_idx])
                                 weights.pop(seq_idx)
                                 oper_list.pop(seq_idx)
-                                oper_list.append(1)
+                                oper_list.append([])
                             break
                         else:
                             flag_swap = True
@@ -232,13 +217,11 @@ cpdef tuple remove_duplicates(list weights, list oper_list):
 
     # Iterate backwards to avoid indexing issues while deleting
     for idx in range(len(weights) - 1, -1, -1):
-        if not isinstance(oper_list[idx], list):
-            continue
-        else: 
-            oper_seq = oper_list[idx]
-            if len(oper_seq) != len(set(oper_seq)):  # Check for duplicates
-                oper_list.pop(idx)
-                weights.pop(idx)
+
+        oper_seq = oper_list[idx]
+        if len(oper_seq) != len(set(oper_seq)):  # Check for duplicates
+            oper_list.pop(idx)
+            weights.pop(idx)
 
     return weights, oper_list  # Return updated lists
 

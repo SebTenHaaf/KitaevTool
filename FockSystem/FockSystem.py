@@ -9,7 +9,7 @@ import sympy
 from IPython.core.display import Markdown
 from IPython.display import display
 
-from .FockSystemBase import FockSystemBase, hamming_weight, operator_verbose,operator_from_string
+from .FockSystemBase import FockSystemBase, operator_verbose,operator_from_string
 from .FockSystemSparse import OperSequenceDataSparse,FockStatesSparse
 from .c import fermion_operations as fo
 
@@ -20,24 +20,21 @@ from typing import Callable, List, Any, Self
 class FockStates(FockSystemBase):
     def __init__(self, states, weights=None, N: int=None):
         self.states = self._parse_states(states)
-        self.hashed =  {num: idx for idx, num in enumerate(self.states)}
-        self.weights = (
-            weights if weights is not None else [1 for i in range(len(self.states))]
-        )
-
-        ## For convenience, store the total number of Fermionic sites N
+        ## Ideally one does not calculate the hash dictionary if the fock states are fock ordered
         if N is None:
             N = int(np.ceil(np.log2(np.max(self.states)+1)/2))
         self.N = N
-
-        ## TODO This flag is not correct now, be smarter about it
-        ## Ideally one does not calculate the hash dictionary if the fock states are fock ordered
         self.is_ordered = True if len(self.states) == 4**N else False
+        if not self.is_ordered:
+            self.hashed =  {num: idx for idx, num in enumerate(self.states)}
+        #self.weights = (
+        #    weights if weights is not None else np.full(1, len(states))
+        #)
 
     @staticmethod
     def _parse_states(states: [int,List,np.ndarray]):
         if isinstance(states,int):
-            return np.arange(4**states)
+            return np.arange(4**states,dtype=np.int32)
         if isinstance(states,list):
             return np.array(states)
         if isinstance(states, np.ndarray):
@@ -89,7 +86,7 @@ class FockStates(FockSystemBase):
                 all_states = all_states[(mask_states)]
 
         ## Create masks for odd and even parity
-        even_states_mask = hamming_weight(all_states) % 2 == 0
+        even_states_mask = np.bitwise_count(all_states) % 2 == 0
         odd_states_mask = ~even_states_mask
 
         ## Seperate the states into odd and even parity
@@ -125,7 +122,7 @@ class OperSequenceData():
         self.rows = sparse_data[0]
         self.cols = sparse_data[1]
         self.parities = sparse_data[2]
-        self.type_strings = sparse_data[3]
+        self.type_dict = sparse_data[3]
         self.values = sparse_data[4]
 
     def _repr_markdown_(self) -> str:
@@ -159,25 +156,29 @@ class OperSequenceData():
 
     def update_values(self, type_keys: list[str], old_val: complex, new_val: complex) -> None:
         ## Set the new value for the relevant positions
-        type_match = np.isin(self.type_strings, type_keys)
-        signs = self.parities[type_match]
-        new_values = signs*new_val
-        self.values[type_match] = new_values
+        for key in type_keys:
+            type_slice = self.type_dict[key]
+            signs = self.parities[type_slice]
+            new_values = signs*new_val
+            self.values[type_slice] = new_values
 
         ## If it has been created, update the matrix
         if hasattr(self, 'data_array'):
-            rows = self.rows[type_match]
-            cols = self.cols[type_match]
-            old_values = signs*old_val
-            filter_diagonal = np.where(rows!=cols) ## Prevent double counting of the diagonal terms
-            np.add.at(
-                self.data_array,
-                (np.append(rows, cols[filter_diagonal]), np.append(cols, rows[filter_diagonal])),
-                np.append(
-                    -old_values + new_values,
-                    -np.conj(old_values[filter_diagonal]) + np.conj(new_values[filter_diagonal]),
-                ),
-            )
+            for key in type_keys:
+                type_slice = self.type_dict[key]
+                rows = self.rows[type_slice]
+                cols = self.cols[type_slice]
+                signs = self.parities[type_slice]
+                old_values = signs*old_val
+                filter_diagonal = np.where(rows!=cols) ## Prevent double counting of the diagonal terms
+                np.add.at(
+                    self.data_array,
+                    (np.append(rows, cols[filter_diagonal]), np.append(cols, rows[filter_diagonal])),
+                    np.append(
+                        -old_values + new_values,
+                        -np.conj(old_values[filter_diagonal]) + np.conj(new_values[filter_diagonal]),
+                    ),
+                )
 
     def to_array(self) -> np.ndarray:
         """
@@ -190,11 +191,11 @@ class OperSequenceData():
     
         arr = np.zeros((array_size, array_size), dtype=complex)
 
-        filter_diagonal = np.where(self.rows!=self.cols)
-        rows = np.append(self.rows, self.cols[filter_diagonal])
-        cols = np.append(self.cols, self.rows[filter_diagonal])
+        filter_diagonal = self.rows!=self.cols
+        rows = np.concatenate((self.rows, self.cols[filter_diagonal]))
+        cols = np.concatenate((self.cols, self.rows[filter_diagonal]))
         new_values = self.values*self.parities
-        vals = np.append(new_values, np.conj(new_values[filter_diagonal]))
+        vals = np.concatenate((new_values, np.conj(new_values[filter_diagonal])))
 
         np.add.at(arr, (rows, cols), vals)
         self.data_array = arr
@@ -764,7 +765,7 @@ class OperSequence(FockSystemBase):
     @staticmethod
     def _multiplication_basis(weights_1, oper_list_1, weights_2, oper_list_2):
         ### CYTHON VERSION
-        # return fo.multiplication_basis(weights_1,oper_list_1, weights_2, oper_list_2)
+        return fo.multiplication_basis(weights_1,oper_list_1, weights_2, oper_list_2)
 
         ### PYTHON VERSION
         oper_products = []
@@ -979,53 +980,71 @@ class OperSequence(FockSystemBase):
         Returns:
             rows (ndarray[int]): row indices of non-zero terms
             cols (ndarray[int]): column indices of non-zero terms
-            pars (ndarray[int]): relative signs of operators for the non-zero terms
-            type (ndarray[str]): the types of operators giving rise to non-zero terms
+            vals (ndarray[complex]): values of each row/col pair
+            pars (ndarray[int]): relative signs of operators for the non-zero terms, for updating the array later
+            type (dict): a dict pointing to where in the row/col memory the values related to a particular vector are stored
         """
-        rows, cols, pars, types,vals = [], [], [], [], []
-        for h, w in zip(self.oper_list, self.weights):
-            if isinstance(h,list):
-                type_str = self.oper_list_to_str(h)
-                old_states, new_states, parities = self.act_oper_list(
-                    h, fock_states.states, rel_sign=1
+        rows_list, cols_list, pars_list, vals_list = [], [], [], []
+        types_dict = {}
+        old_idx = 0
+        type_strings = [self.oper_list_to_str(h) for h in self.oper_list]
+        vals=[]
+
+        ## Unpack reference to array and weights (saves time inside the loop for larger systems)
+        states=fock_states.states
+        oper_list = self.oper_list
+        weights = self.weights
+        act_func = self.act_oper_list
+
+        ## For ordered states no need to loop through
+        if fock_states.is_ordered:
+            for h, type_str in zip(oper_list, type_strings):
+                
+                old_states, new_states, parities = act_func(
+                    h, states,
                 )
-                if not fock_states.is_ordered:
-                    subspace_filt = [state in fock_states.hashed for state in new_states]
-                    old_states = old_states[subspace_filt]
-                    new_states = new_states[subspace_filt]
-                    parities = parities[subspace_filt]
+                rows_list.append(old_states)
+                cols_list.append(new_states)
+                pars_list.append(parities)
+                n_vals = new_states.shape[0]
+                types_dict[type_str] = slice(old_idx, old_idx+n_vals)
+                old_idx +=n_vals
+            rows = np.concatenate(rows_list)
+            cols = np.concatenate(cols_list)
+            pars = np.concatenate(pars_list)
+            ### Load values into right positions at once
+            vals = np.empty(old_idx, dtype=np.complex128)
+            for w, type_str in zip(weights, type_strings):
+                sl = types_dict[type_str]
+                vals[sl] = w
+            
+        else:
+            for h, w,type_str in zip(self.oper_list, self.weights,type_strings):
+                
+                old_states, new_states, parities = self.act_oper_list(
+                    h, fock_states.states,
+                )
+                subspace_filt = np.isin(new_states, np.array(list(fock_states.hashed.keys())))
+                old_states = old_states[subspace_filt]
+                new_states = new_states[subspace_filt]
+                parities = parities[subspace_filt]
+    
+                rows_list.append([fock_states.hashed.get(state) for state in old_states])
+                cols_list.append([fock_states.hashed.get(state) for state in new_states])
+                pars_list.append(parities)
 
-                    types.extend([type_str] * len(parities))
-                    rows.extend([fock_states.hashed.get(state) for state in old_states])
-                    cols.extend([fock_states.hashed.get(state) for state in new_states])
-                    pars.extend(parities.tolist())
-                    vals.extend([w for _ in range(len(parities))])
-                else:
-                    types.extend([type_str] * len(parities))
-                    rows.extend(old_states)
-                    cols.extend(new_states)
-                    pars.extend(parities)
-                    vals.extend([w for _ in range(len(parities))])
+                n_vals = new_states.shape[0]
+                vals_list.append(np.full(n_vals, w, dtype=complex))
+                types_dict[type_str] = slice(old_idx, old_idx+n_vals)
+                old_idx += n_vals
 
-        list_1, list_2 = map(
-            list,
-            zip(
-                *[
-                    (b, a) if a > b else (a, b)
-                    for a, b in zip(rows, cols)
-                ]
-            ),
-        )
-        rows = np.array(list_1)
-        cols = np.array(list_2)
-
-        return (
-            np.array(rows, dtype=np.int32),
-            np.array(cols, dtype=np.int32),
-            np.array(pars, dtype=np.int32),
-            np.array(types,dtype=str),
-            np.array(vals, dtype = complex)
-        )
+            rows = np.concatenate(rows_list)#.astype(np.int32)
+            cols = np.concatenate(cols_list)#.astype(np.int32)
+            pars = np.concatenate(pars_list)#.astype(np.int8)
+            vals = np.concatenate(vals_list)
+        
+        return rows, cols,pars,types_dict, vals
+       
     
     def _construct_sparse_data_repr(self, N):
         big_N = 4**N
@@ -1137,8 +1156,8 @@ class OperSequence(FockSystemBase):
     ## Remove duplicate operators
     def remove_duplicates(self) -> None:
         ### CYTHON VERSION
-        #self.weights,self.oper_list = fo.remove_duplicates(self.weights,self.oper_list)
-        #return
+        self.weights,self.oper_list = fo.remove_duplicates(self.weights,self.oper_list)
+        return
 
         ### PYTHON VERSION
         for idx in range(len(self.weights) - 1, -1, -1):
@@ -1148,8 +1167,8 @@ class OperSequence(FockSystemBase):
 
     def merge_terms(self) -> None:
         ### CYTHON VERSION
-        #self.weights,self.oper_list = fo.merge_terms_cython(self.weights,self.oper_list)
-        #return
+        self.weights,self.oper_list = fo.merge_terms_cython(self.weights,self.oper_list)
+        return
 
         ### PYTHON VERSION
         merged_weight,merged_list = [],[]
@@ -1185,8 +1204,8 @@ class OperSequence(FockSystemBase):
             Return None (OperSequence is modified in place)
         '''
         ### CYTHON VERSION
-        #self.weights,self.oper_list = fo.normal_order(self.weights,self.oper_list)
-        #return 
+        self.weights,self.oper_list = fo.normal_order(self.weights,self.oper_list)
+        return 
 
         ### PYTHON VERSION
         is_normal_ordered=False
