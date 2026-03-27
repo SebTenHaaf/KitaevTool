@@ -408,8 +408,9 @@ class OperSequence(FockSystemBase):
         
         ## Remove the first " $+$ " for formatting purposes
         if operstr[0:4] == " $+$":
-            return operstr[4:]
-        return operstr
+            return operstr[4:].replace("$$", "") 
+        return operstr.replace("$$", "") # ending mathmode and starting it right after again confuses the renderer
+        
         
     def symbolic(self) -> None:
         operstr = ""
